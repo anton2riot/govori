@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>Govori.CrossPlatform</AssemblyName>
+    <ApplicationIcon>Assets/govori.ico</ApplicationIcon>
+    <MSBuildEnableWorkloadResolver>false</MSBuildEnableWorkloadResolver>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Desktop" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="11.3.22" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="11.3.22" />
+    <PackageReference Include="PortAudio.Native" Version="19.7.0" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
+    <AvaloniaResource Include="Assets/**" />
+    <EmbeddedResource Include="Localization/*.json" LogicalName="Govori.Localization.%(Filename)%(Extension)" />
+    <InternalsVisibleTo Include="Govori.Tests" />
+  </ItemGroup>
+</Project>
