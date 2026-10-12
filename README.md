@@ -85,4 +85,6 @@ The shared interface, recording and Gemini client are cross-platform. Windows de
 
 Run `pwsh -File tools/check-repository.ps1` before publishing. The same check runs in CI on all three operating systems. `.gitignore` excludes credentials, recordings, history, machine-specific files and build output; it does not protect files that were already committed. Publish the source through Git. Build output, verification reports and UI images are local artifacts and should not be added to Git or included in a source archive. The checker covers the current working tree and Git index; it does not scan past commits. Before publishing an existing repository, inspect its history separately and revoke any previously exposed credentials.
 
-No redistribution license has been selected yet. Choose and add a `LICENSE` file before offering the project for reuse.
+## License
+
+Licensed under the MIT License. See [LICENSE](LICENSE).
