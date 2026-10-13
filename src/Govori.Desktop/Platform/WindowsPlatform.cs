@@ -35,7 +35,8 @@ internal sealed class WindowsPlatform : IDesktopPlatform
         // Win32 applies its minimum tracking size even to undecorated Avalonia
         // windows. Resize the actual HWND after Show, as in the WPF indicator.
         SetWindowPos(hwnd, (nint)(-1), window.Position.X, window.Position.Y,
-            OverlayWindow.PhysicalSize, OverlayWindow.PhysicalSize, 0x10 | 0x40 | 0x20);
+            window is OverlayWindow ? OverlayWindow.PhysicalSize : Math.Max(1, (int)Math.Round(window.Bounds.Width * window.RenderScaling)),
+            window is OverlayWindow ? OverlayWindow.PhysicalSize : Math.Max(1, (int)Math.Round(window.Bounds.Height * window.RenderScaling)), 0x10 | 0x40 | 0x20);
     }
     public void Dispose() { }
     [DllImport("user32.dll")] private static extern int GetWindowLong(nint hwnd, int index);

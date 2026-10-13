@@ -36,6 +36,7 @@ internal sealed class MainWindow : Window
     private readonly ToggleSwitch startup = new() { Name = "StartWithSystem", OnContent = "", OffContent = "" };
     private readonly TextBlock validation = new() { Foreground = Brush.Parse("#BB526D"), TextWrapping = TextWrapping.Wrap, FontSize = 12 };
     private bool loading;
+    internal string? StatusText => status.Text;
 
     public MainWindow(DictationController controller)
     {
@@ -158,9 +159,10 @@ internal sealed class MainWindow : Window
     }
     public void OpenHistory() { ShowPage(false); Show(); WindowState = WindowState.Normal; Activate(); RefreshHistory(); }
     public void OpenSettings() { ShowPage(true); Show(); WindowState = WindowState.Normal; Activate(); }
-    public void UpdateStatus(string? text, bool busy, bool recording)
+    public void UpdateStatus(string? text, bool busy, bool recording, bool error = false)
     {
-        if (text != null) status.Text = text; cancel.IsVisible = busy; record.Content = recording ? Localization.T("Stop") : Localization.T("Record");
+        if (text != null) { status.Text = text; status.Foreground = Brush.Parse(error ? "#BB526D" : "#9393A6"); }
+        cancel.IsVisible = busy; record.Content = recording ? Localization.T("Stop") : Localization.T("Record");
     }
     public void RefreshHistory()
     {

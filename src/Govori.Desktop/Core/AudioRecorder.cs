@@ -6,9 +6,23 @@ namespace Govori;
 public sealed record Microphone(int Id, string Name);
 public sealed record Recording(string Path, double Duration, float Peak);
 
-public sealed class AudioRecorder : IDisposable
+internal interface IAudioRecorder : IDisposable
+{
+    bool IsRecording { get; }
+    bool IsReady { get; }
+    Exception? Error { get; }
+    float CurrentLevel { get; }
+    event Action? BecameReady;
+    List<Microphone> Devices();
+    void Start(int device);
+    Task<Recording?> StopAsync();
+}
+
+public sealed class AudioRecorder : IAudioRecorder
 {
     internal const int SpeechSampleRate = 16000;
+    internal const float MinimumSignalLevel = 0.001f;
+    private readonly AudioSignal signal = new();
     private nint stream;
     private Task<Recording>? capture;
     private Task<Recording?>? stopTask;
@@ -19,10 +33,20 @@ public sealed class AudioRecorder : IDisposable
     private float level;
     private bool initialized;
     private readonly object streamGate = new();
-    public bool IsRecording => !stopping && callbackError == null && capture is { IsCompleted: false };
+    public bool IsRecording
+    {
+        get
+        {
+            lock (streamGate)
+                return !stopping && callbackError == null && capture is { IsCompleted: false }
+                    && stream != 0 && Pa.IsStreamActive(stream) == 1;
+        }
+    }
     public bool IsReady => ready;
     internal Exception? Error => callbackError ?? capture?.Exception?.GetBaseException();
     internal event Action? BecameReady;
+    Exception? IAudioRecorder.Error => Error;
+    event Action? IAudioRecorder.BecameReady { add => BecameReady += value; remove => BecameReady -= value; }
     public float CurrentLevel => level;
 
     public AudioRecorder() { callback = OnAudio; Check(Pa.Initialize()); initialized = true; }
@@ -54,6 +78,7 @@ public sealed class AudioRecorder : IDisposable
         // backends require the device rate, so retain that working fallback.
         if (Pa.IsFormatSupported(ref input, 0, SpeechSampleRate) == 0) sampleRate = SpeechSampleRate;
         stopping = false; ready = false; level = 0; callbackError = null; stopTask = null;
+        signal.Reset();
         buffers = new BlockingCollection<short[]>(256);
         string path = Path.Combine(Configuration.AudioDirectory, Guid.NewGuid().ToString("N") + ".wav");
         try
@@ -84,9 +109,9 @@ public sealed class AudioRecorder : IDisposable
         {
             var buffer = new short[checked((int)frames)]; Marshal.Copy(input, buffer, 0, buffer.Length);
             if (!buffers!.TryAdd(buffer)) throw new IOException(Localization.T("AudioQueueFull"));
-            // Silence also confirms that capture is live. Notify the UI on the
-            // first buffer rather than making it wait for a polling timer.
-            if (!ready && buffer.Length > 0) { ready = true; BecameReady?.Invoke(); }
+            // Muted and disconnected devices can keep delivering silent buffers.
+            // Confirm actual input before showing green or playing the chime.
+            if (signal.Observe(buffer)) { ready = true; BecameReady?.Invoke(); }
             return 0;
         }
         catch (Exception ex) { callbackError = ex; return 2; }
@@ -166,7 +191,25 @@ public sealed class AudioRecorder : IDisposable
         [DllImport(Lib, EntryPoint="Pa_IsFormatSupported", CallingConvention=CallingConvention.Cdecl)] internal static extern int IsFormatSupported(ref StreamParameters input, nint output, double sampleRate);
         [DllImport(Lib, EntryPoint="Pa_OpenStream", CallingConvention=CallingConvention.Cdecl)] internal static extern int OpenStream(out nint stream, ref StreamParameters input, nint output, double sampleRate, nuint frames, nuint flags, nint callback, nint user);
         [DllImport(Lib, EntryPoint="Pa_StartStream", CallingConvention=CallingConvention.Cdecl)] internal static extern int StartStream(nint stream);
+        [DllImport(Lib, EntryPoint="Pa_IsStreamActive", CallingConvention=CallingConvention.Cdecl)] internal static extern int IsStreamActive(nint stream);
         [DllImport(Lib, EntryPoint="Pa_AbortStream", CallingConvention=CallingConvention.Cdecl)] internal static extern int AbortStream(nint stream);
         [DllImport(Lib, EntryPoint="Pa_CloseStream", CallingConvention=CallingConvention.Cdecl)] internal static extern int CloseStream(nint stream);
+    }
+}
+
+internal sealed class AudioSignal
+{
+    internal bool HasSignal { get; private set; }
+    internal void Reset() => HasSignal = false;
+    internal bool Observe(ReadOnlySpan<short> samples)
+    {
+        if (HasSignal) return false;
+        foreach (short sample in samples)
+            if (Math.Abs(sample / 32768f) >= AudioRecorder.MinimumSignalLevel)
+            {
+                HasSignal = true;
+                return true;
+            }
+        return false;
     }
 }

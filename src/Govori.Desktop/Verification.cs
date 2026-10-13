@@ -40,6 +40,13 @@ internal static class Verification
     public static async Task RunAsync(MainWindow window, DictationController controller, string[] args)
     {
         checks.Clear(); audioTimings.Clear(); await Task.Delay(300);
+        if (args.Contains("--microphone-errors"))
+        {
+            controller.Hotkeys.Enabled = false;
+            await MicrophoneFailureChecks();
+            checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
+            return;
+        }
         Check(Configuration.DataDirectory.Contains("CrossPlatform", StringComparison.OrdinalIgnoreCase) || args.Contains("--data-dir"), "separate experiment data directory");
         Check(Hotkey.Parse("ctrl+space").Label == "Ctrl+Space" && Hotkey.Parse("RightAlt").Key == 0xA5, "hotkeys parse and normalize");
         bool rejected = false; try { Hotkey.Parse("Space"); } catch (FormatException) { rejected = true; }
@@ -88,12 +95,14 @@ internal static class Verification
         var microphoneWait = Stopwatch.StartNew();
         controller.Recorder.Start(-1);
         while (!controller.Recorder.IsReady && controller.Recorder.IsRecording && microphoneWait.Elapsed.TotalSeconds < 5) await Task.Delay(40);
-        Check(controller.Recorder.IsReady, "microphone readiness follows received audio");
+        Check(controller.Recorder.IsRecording, "microphone capture remains active while waiting for sound");
         double readyMs = microphoneWait.Elapsed.TotalMilliseconds;
         await Task.Delay(400);
-        Check(Volatile.Read(ref readyNotifications) == 1, "microphone notifies readiness once without waiting for UI polling");
+        bool receivedSound = controller.Recorder.IsReady;
+        Check(Volatile.Read(ref readyNotifications) == (receivedSound ? 1 : 0), "microphone notifies readiness once only when sound is detected");
         var microphoneStop = Stopwatch.StartNew();
         var recording = (await controller.Recorder.StopAsync())!;
+        Check(receivedSound == (recording.Peak >= AudioRecorder.MinimumSignalLevel), "native readiness agrees with the recorded PCM signal");
         controller.Recorder.BecameReady -= OnReady;
         double stopMs = microphoneStop.Elapsed.TotalMilliseconds;
         var wav = File.ReadAllBytes(recording.Path);
@@ -110,21 +119,37 @@ internal static class Verification
         }
         if (controller.Hotkeys is HotkeyState realHook)
         {
+            string? hotkeyEnvironment = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", "verification-microphone-key");
             int beforeRecording = controller.History.Entries.Count;
             var shortcut = controller.Hotkeys.Dictation;
             var readyWait = Stopwatch.StartNew();
             Check(realHook.HandleKey(shortcut.Key, true, false, false, true), "dictation shortcut is handled by the live controller hook");
-            while (!controller.RecordingReady && readyWait.Elapsed.TotalSeconds < 5) await Task.Delay(40);
-            Check(controller.RecordingReady && controller.Indicator?.State == "recording", "hotkey reaches the actual ready state and green recording indicator");
-            var readySound = controller.ReadySoundPlayback;
-            Check(readySound != null && await readySound.WaitAsync(TimeSpan.FromSeconds(5)), "microphone readiness plays the sound through the default output device");
-            await Task.Delay(100);
-            Check(ReferenceEquals(controller.ReadySoundPlayback, readySound), "readiness sound plays only once per recording despite timer updates");
-            audioTimings.Add(new { stage = "hotkey-to-ready", readyMs = readyWait.Elapsed.TotalMilliseconds });
-            Render(controller.Indicator!, Path.Combine(Configuration.DataDirectory, "indicator-ready.png"));
-            controller.Cancel(); realHook.HandleKey(shortcut.Key, false, true, false);
-            var stopWait = Stopwatch.StartNew(); while (controller.Busy && stopWait.Elapsed.TotalSeconds < 5) await Task.Delay(40);
-            Check(!controller.Busy && controller.Indicator?.IsVisible == false && controller.History.Entries.Count == beforeRecording, "cancelling hotkey recording stops capture and dismisses the indicator");
+            await Task.Delay(40); // Let the dispatched StartRecording run before observing its state.
+            while (controller.Recording && !controller.RecordingReady && readyWait.Elapsed.TotalSeconds < 6) await Task.Delay(40);
+            if (controller.RecordingReady)
+            {
+                Check(controller.Indicator?.State == "recording", "hotkey reaches the actual ready state and green recording indicator");
+                var readySound = controller.ReadySoundPlayback;
+                Check(readySound != null && await readySound.WaitAsync(TimeSpan.FromSeconds(5)), "microphone readiness plays the sound through the default output device");
+                await Task.Delay(100);
+                Check(ReferenceEquals(controller.ReadySoundPlayback, readySound), "readiness sound plays only once per recording despite timer updates");
+                audioTimings.Add(new { stage = "hotkey-to-ready", readyMs = readyWait.Elapsed.TotalMilliseconds });
+                Render(controller.Indicator!, Path.Combine(Configuration.DataDirectory, "indicator-ready.png"));
+                controller.Cancel(); realHook.HandleKey(shortcut.Key, false, true, false);
+                var stopWait = Stopwatch.StartNew(); while (controller.Busy && stopWait.Elapsed.TotalSeconds < 5) await Task.Delay(40);
+                Check(!controller.Busy && controller.Indicator?.IsVisible == false && controller.History.Entries.Count == beforeRecording, "cancelling hotkey recording stops capture and dismisses the indicator");
+            }
+            else
+            {
+                var stopWait = Stopwatch.StartNew(); while (controller.Busy && stopWait.Elapsed.TotalSeconds < 5) await Task.Delay(40);
+                Check(!controller.Busy && controller.Indicator is { State: "error", ErrorNoticeVisible: true }
+                    && controller.ReadySoundPlayback == null && controller.History.Entries.Count == beforeRecording,
+                    $"silent native microphone fails visibly without a ready sound or transcription (status={window.StatusText}, state={controller.Indicator?.State}, visible={controller.Indicator?.ErrorNoticeVisible}, busy={controller.Busy})");
+                realHook.HandleKey(shortcut.Key, false, true, false);
+                controller.Indicator!.Hide();
+            }
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", hotkeyEnvironment); Configuration.LoadEnvironment();
         }
         if (OperatingSystem.IsWindows()) await WindowsChecks(window, controller);
         if (args.Contains("--live-api"))
@@ -140,6 +165,106 @@ internal static class Verification
         window.OpenHistory(); await Task.Delay(150); Render(window, Path.Combine(Configuration.DataDirectory, "history.png"));
         checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
         File.WriteAllText(Path.Combine(Configuration.DataDirectory, "audio-timings.json"), JsonSerializer.Serialize(audioTimings, new JsonSerializerOptions { WriteIndented = true }));
+    }
+    private static async Task MicrophoneFailureChecks()
+    {
+        var signal = new AudioSignal();
+        bool silentUnconfirmed = true;
+        for (int i = 0; i < 400; i++) silentUnconfirmed &= !signal.Observe(new short[256]) && !signal.HasSignal;
+        Check(silentUnconfirmed, "continuous silent buffers cannot confirm microphone input");
+        Check(!signal.Observe([1, -1, 32, -32]) && !signal.HasSignal, "samples below the usable audio threshold do not confirm input");
+        Check(signal.Observe([0, -33]) && signal.HasSignal && !signal.Observe([100]), "actual input confirms readiness only once");
+        signal.Reset(); Check(!signal.HasSignal && signal.Observe([short.MinValue]), "a new recording resets readiness and accepts negative PCM input");
+
+        using var recorder = new TestRecorder();
+        using var controller = new DictationController(recorder);
+        controller.Hotkeys.Enabled = false;
+        var window = new MainWindow(controller); controller.Attach(window);
+        string? environment = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
+        try
+        {
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", "verification-microphone-key");
+            var settings = controller.Settings.Clone(); settings.Language = "ru"; controller.CommitSettings(settings);
+            void Failed(string message)
+            {
+                Check(!controller.Recording && !controller.Busy && !controller.Hotkeys.Recording, message + ": capture and hotkeys stopped");
+                Check(controller.Indicator is { State: "error", IsVisible: true, ErrorNoticeVisible: true } && !window.IsVisible,
+                    message + ": red indicator and explanation visible with main window hidden");
+                Check(controller.History.Entries.Count == 0, message + ": nothing sent for transcription or added to history");
+            }
+
+            recorder.StartError = new InvalidOperationException(Localization.T("MicrophoneMissing"));
+            controller.StartRecording(); Failed("missing microphone");
+            Check(window.StatusText == Localization.T("MicrophoneMissing") && controller.ReadySoundPlayback == null, "missing microphone shows its cause without a ready sound");
+            Render(controller.Indicator!, Path.Combine(Configuration.DataDirectory, "indicator-error.png"));
+            Render(controller.Indicator!.ErrorNotice, Path.Combine(Configuration.DataDirectory, "microphone-error.png"));
+            if (OperatingSystem.IsWindows())
+            {
+                WindowsPlatform.GetWindowRect(controller.Indicator.ErrorNotice.TryGetPlatformHandle()!.Handle, out var rect);
+                Check(rect.Right - rect.Left > 100 && rect.Bottom - rect.Top > 40, "error explanation has a readable native window size");
+            }
+            recorder.StartError = null;
+
+            controller.StartRecording(); recorder.Receive(new short[256]); await Task.Delay(100);
+            Check(controller.Recording && !controller.RecordingReady && controller.Indicator?.State == "starting" && controller.ReadySoundPlayback == null,
+                "silent input keeps a grey indicator without a ready sound");
+            await controller.StopRecordingAsync(); Failed("silent recording released early");
+            Check(window.StatusText == Localization.T("NoSpeechRecorded") && !File.Exists(recorder.Path), "silent audio is deleted and reported as unrecorded");
+
+            recorder.Duration = 0.1;
+            controller.StartRecording(); recorder.Receive([100, -100]); await controller.StopRecordingAsync(); Failed("unusably short recording");
+            Check(!File.Exists(recorder.Path), "unusably short audio is deleted without showing processing");
+            recorder.Duration = 0.4;
+
+            controller.StartRecording(); recorder.Receive(new short[256]);
+            await Task.Delay(5300); Failed("silent input timeout");
+            Check(window.StatusText == Localization.T("MicrophoneTimeout") && controller.ReadySoundPlayback == null && !File.Exists(recorder.Path),
+                $"silent callbacks cannot bypass the timeout or leave a recording behind (status={window.StatusText}, sound={controller.ReadySoundPlayback != null}, file={File.Exists(recorder.Path)})");
+
+            controller.StartRecording(); recorder.Receive([100, -100]); await Task.Delay(100);
+            Check(controller.RecordingReady && controller.Indicator?.State == "recording", "actual input turns the indicator green");
+            recorder.IsRecording = false; await Task.Delay(150); Failed("microphone stops during recording");
+            Check(window.StatusText == Localization.T("MicrophoneStopped") && !File.Exists(recorder.Path), "stopped input reports the cause and discards incomplete audio");
+
+            controller.StartRecording(); recorder.Receive(new short[256]); controller.Cancel(); await Task.Delay(100);
+            Check(!controller.Busy && controller.Indicator?.IsVisible == false && controller.Indicator?.ErrorNoticeVisible == false
+                && window.StatusText == Localization.T("RecordingCancelled"), "intentional cancellation hides the indicator without an error");
+            controller.StartRecording(); recorder.Receive([100, -100]); await Task.Delay(100); controller.Cancel(); await Task.Delay(100);
+            Check(!controller.Busy && !File.Exists(recorder.Path), "recording recovers after a microphone failure");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GEMINI_API_KEY", environment); Configuration.LoadEnvironment();
+            window.Close();
+        }
+    }
+
+    private sealed class TestRecorder : IAudioRecorder
+    {
+        private readonly AudioSignal signal = new();
+        public bool IsRecording { get; set; }
+        public bool IsReady => signal.HasSignal;
+        public Exception? Error => null;
+        public Exception? StartError { get; set; }
+        internal double Duration { get; set; } = 0.4;
+        public float CurrentLevel { get; private set; }
+        public event Action? BecameReady;
+        internal string Path { get; private set; } = "";
+        public List<Microphone> Devices() => [new(-1, Localization.T("DefaultMicrophone"))];
+        public void Start(int device)
+        {
+            if (StartError != null) throw StartError;
+            signal.Reset(); CurrentLevel = 0; IsRecording = true;
+            Path = System.IO.Path.Combine(Configuration.AudioDirectory, Guid.NewGuid().ToString("N") + ".wav");
+            using var writer = new BinaryWriter(File.Create(Path)); AudioRecorder.WriteHeader(writer, 16000, 12800); writer.Write(new byte[12800]);
+        }
+        internal void Receive(short[] samples)
+        {
+            CurrentLevel = Math.Max(CurrentLevel, samples.Select(x => Math.Abs(x / 32768f)).DefaultIfEmpty().Max());
+            if (signal.Observe(samples)) BecameReady?.Invoke();
+        }
+        public Task<Recording?> StopAsync() { IsRecording = false; return Task.FromResult<Recording?>(new(Path, Duration, CurrentLevel)); }
+        public void Dispose() { if (File.Exists(Path)) File.Delete(Path); }
     }
     [SupportedOSPlatform("windows")]
     private static async Task StartupChecks(MainWindow window, DictationController controller)

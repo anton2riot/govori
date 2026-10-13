@@ -5,7 +5,7 @@ A desktop voice-to-text app built with .NET 9, Avalonia and PortAudio. Hold a sh
 ## Features
 
 - Hold-to-record shortcut, a Record button, and local transcription history.
-- An 18-pixel indicator: grey while preparing, green when the microphone is ready, amber while transcribing. A quiet 100 ms chime signals that the microphone is ready to speak.
+- An 18-pixel indicator: grey while checking input, green after microphone sound is detected, amber while transcribing. A quiet 100 ms chime confirms incoming sound. Failed recordings show a red indicator and an explanation even when the main window is hidden.
 - Automatic paste with clipboard restoration and protection against pasting into a different window.
 - Retry saved recordings after network errors; successful recordings are deleted.
 - English and Russian interfaces. The system language is selected by default; unsupported languages fall back to English. Change **Settings → Language** without restarting. The interface language does not change the language of your dictation.
@@ -24,7 +24,7 @@ The installer copies the self-contained app to `%LOCALAPPDATA%\Dictophone.CrossP
 
 Open **Settings → Gemini API key**, paste your key and click **Save key**. It applies immediately and is kept separately from settings in `gemini-key.bin`. Windows encrypts it with DPAPI for the current user; Linux and macOS restrict the file to the current user. **Delete key** removes this saved copy. You can also use `GEMINI_API_KEY` in the environment or `%LOCALAPPDATA%\Dictophone.CrossPlatform\.env`; the key saved in Settings takes precedence, followed by the environment variable and then `.env`. Use `.env.example` as a reference; never commit your actual key.
 
-By default, hold **Ctrl+Space** to record, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. Wait for the green indicator before speaking. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
+By default, hold **Ctrl+Space** to record, speak, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. The indicator turns green once microphone sound is detected; silent buffers do not confirm working input. If no sound is detected within five seconds, recording stops with a visible error. Silent or unusably short recordings are not transcribed. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
 
 Closing the window hides it in the tray. Click the tray icon to reopen it, or choose History / Settings from its menu. Choose Exit to quit. Start at login can also be enabled or disabled in Settings. `start.ps1` / `start.cmd` opens the installed app, or builds and opens a portable copy if needed.
 
@@ -50,6 +50,8 @@ Speech is captured as mono PCM16 at 16 kHz when the device supports it, with the
 
 ```powershell
 ./build.ps1 -Verify
+# Deterministic microphone failure checks (no working microphone required):
+./artifacts/publish/win-x64/Govori.CrossPlatform.exe --verify --tray --microphone-errors --data-dir ./artifacts/verification-microphone-errors
 # Optional live API test with a prepared speech WAV:
 ./build.ps1 -Verify -LiveAudio path/to/speech.wav
 # Install an already built Windows copy:

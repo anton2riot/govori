@@ -9,7 +9,7 @@ internal sealed class DictationController : IDisposable
 {
     internal IDesktopPlatform Platform { get; }
     internal IGlobalHotkeys Hotkeys { get; }
-    internal AudioRecorder Recorder { get; }
+    internal IAudioRecorder Recorder { get; }
     internal TextInserter Inserter { get; private set; } = null!;
     public Settings Settings { get; private set; }
     public HistoryStore History { get; }
@@ -27,14 +27,14 @@ internal sealed class DictationController : IDisposable
     internal bool RecordingReady => Recording && ready;
     internal Task<bool>? ReadySoundPlayback { get; private set; }
     internal OverlayWindow? Indicator => overlay;
-    public bool Busy => Recording || processing.Count > 0;
+    public bool Busy => Recording || stopping || processing.Count > 0;
     public bool IsExiting { get; private set; }
     public event Action? SettingsChanged;
 
-    public DictationController()
+    public DictationController(IAudioRecorder? recorder = null)
     {
         Settings = Configuration.LoadSettings(); Localization.Apply(Settings.Language); History = new();
-        Platform = DesktopPlatform.Create(); Recorder = new AudioRecorder();
+        Platform = DesktopPlatform.Create(); Recorder = recorder ?? new AudioRecorder();
         Recorder.BecameReady += () => Dispatcher.UIThread.Post(UpdateRecordingReady);
         Hotkeys = Platform.CreateHotkeys(Hotkey.Parse(Settings.Hotkey), Hotkey.Parse(Settings.HistoryHotkey));
         Hotkeys.Pressed += () => Dispatcher.UIThread.Post(StartRecording);
@@ -62,7 +62,13 @@ internal sealed class DictationController : IDisposable
     }
     private async Task FailRecordingAsync(string error)
     {
-        cancelled = true; await StopRecordingAsync(); SetStatus(error);
+        if (!Recording || stopping) return;
+        cancelled = true; await StopRecordingAsync(); ShowRecordingError(error);
+    }
+    private void ShowRecordingError(string error)
+    {
+        window?.UpdateStatus(error, Busy, Recording, error: true);
+        overlay?.ShowError(target, Settings.IndicatorEdge, error);
     }
     public void Attach(MainWindow main)
     {
@@ -76,15 +82,14 @@ internal sealed class DictationController : IDisposable
         if (string.IsNullOrWhiteSpace(Configuration.ApiKey)) { SetStatus(Localization.T("ApiKeyNotFound")); return; }
         try
         {
-            cancelled = false; ready = false; target = Platform.ForegroundWindow();
+            cancelled = false; ready = false; ReadySoundPlayback = null; target = Platform.ForegroundWindow();
             Recorder.Start(Settings.MicrophoneDevice); Recording = true; Hotkeys.Recording = true;
             overlay?.ShowState(target, Settings.IndicatorEdge, "starting");
             clock = Stopwatch.StartNew(); timer.Start(); SetStatus(Localization.T("PreparingMicrophone"));
         }
         catch (Exception ex)
         {
-            overlay?.Hide();
-            if (Recording) _ = FailRecordingAsync(ex.Message); else SetStatus(ex.Message);
+            if (Recording) _ = FailRecordingAsync(ex.Message); else ShowRecordingError(ex.Message);
         }
     }
     public async Task StopRecordingAsync()
@@ -92,20 +97,30 @@ internal sealed class DictationController : IDisposable
         if (!Recording || stopping) return;
         stopping = true; Recording = false; Hotkeys.Recording = false; timer.Stop(); clock?.Stop();
         var destination = target;
-        if (cancelled) overlay?.Hide(); else overlay?.ShowState(destination, Settings.IndicatorEdge, "processing");
+        // Processing begins only after usable audio has been checked.
+        overlay?.Hide();
+        string? recordingError = null;
         try
         {
             var audio = await Recorder.StopAsync();
-            if (audio == null) return;
-            if (cancelled || audio.Duration < 0.2 || audio.Peak < 0.001f)
+            if (audio == null) { if (!cancelled) recordingError = Localization.T("NoSpeechRecorded"); return; }
+            if (cancelled || audio.Duration < 0.2 || audio.Peak < AudioRecorder.MinimumSignalLevel)
             {
-                File.Delete(audio.Path); SetStatus(cancelled ? Localization.T("RecordingCancelled") : Localization.T("NoSpeechRecorded")); return;
+                File.Delete(audio.Path);
+                if (cancelled) SetStatus(Localization.T("RecordingCancelled"));
+                else recordingError = Localization.T("NoSpeechRecorded");
+                return;
             }
             var entry = new HistoryEntry { AudioPath = audio.Path, Duration = audio.Duration, Target = Platform.WindowTitle(destination) };
             History.Add(entry); _ = ProcessAsync(entry, destination, true);
         }
-        catch (Exception ex) { SetStatus(ex.Message); }
-        finally { stopping = false; if (!Busy) overlay?.Hide(); window?.UpdateStatus(null, Busy, Recording); }
+        catch (Exception ex) { recordingError = ex.Message; }
+        finally
+        {
+            stopping = false; if (!Busy) HideIndicator();
+            window?.UpdateStatus(null, Busy, Recording);
+            if (recordingError != null) ShowRecordingError(recordingError);
+        }
     }
     public bool IsProcessing(string id) => processing.ContainsKey(id);
     public void Retry(HistoryEntry entry)
@@ -126,7 +141,7 @@ internal sealed class DictationController : IDisposable
             var text = await gemini.TranscribeAsync(entry.AudioPath, settings, Configuration.ApiKey, cancellation.Token);
             entry.Latency = elapsed.Elapsed.TotalSeconds; entry.Text = text;
             entry.Status = string.IsNullOrWhiteSpace(text) ? "empty" : "saved"; History.Save();
-            if (!Recording && processing.Count == 1) overlay?.Hide();
+            if (!Recording && processing.Count == 1) HideIndicator();
             if (!string.IsNullOrWhiteSpace(text))
             {
                 if (paste && !Recording)
@@ -150,7 +165,7 @@ internal sealed class DictationController : IDisposable
         {
             if (acquired) networkGate.Release(); processing.Remove(entry.Id);
             try { History.Save(); } catch { SetStatus(Localization.T("HistorySaveError")); }
-            if (!Busy) overlay?.Hide();
+            if (!Busy) HideIndicator();
             window?.UpdateStatus(null, Busy, Recording);
         }
     }
@@ -203,6 +218,7 @@ internal sealed class DictationController : IDisposable
         }
     }
     public void SetStatus(string text) => window?.UpdateStatus(text, Busy, Recording);
+    private void HideIndicator() { if (overlay?.State != "error") overlay?.Hide(); }
     internal void SaveApiKey(string key)
     {
         ApiKeyStore.Save(key);
