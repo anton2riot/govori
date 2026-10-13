@@ -6,7 +6,7 @@ namespace Govori;
 
 public sealed class Settings
 {
-    public string Hotkey { get; set; } = "F8";
+    public string Hotkey { get; set; } = "Ctrl+Space";
     public string HistoryHotkey { get; set; } = "Ctrl+Alt+J";
     public string Model { get; set; } = "gemini-2.5-flash";
     public string Vocabulary { get; set; } = "";

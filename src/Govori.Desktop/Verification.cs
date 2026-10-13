@@ -136,7 +136,7 @@ internal static class Verification
             Check(entry.Text.Contains("42") && (entry.Text.Contains("диктовки", StringComparison.OrdinalIgnoreCase) || entry.Text.Contains("dictation", StringComparison.OrdinalIgnoreCase)), "synthetic speech transcribes through live Gemini");
             Check(!File.Exists(copy) && entry.AudioPath.Length == 0, "successful transcription cleans its audio");
         }
-        controller.History.Add(new HistoryEntry { Text = "Можно проверить новую версию на Windows: удерживайте F8 и говорите.", Duration = 4 });
+        controller.History.Add(new HistoryEntry { Text = "Можно проверить новую версию на Windows: удерживайте Ctrl+Space и говорите.", Duration = 4 });
         window.OpenHistory(); await Task.Delay(150); Render(window, Path.Combine(Configuration.DataDirectory, "history.png"));
         checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
         File.WriteAllText(Path.Combine(Configuration.DataDirectory, "audio-timings.json"), JsonSerializer.Serialize(audioTimings, new JsonSerializerOptions { WriteIndented = true }));

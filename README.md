@@ -24,7 +24,7 @@ The installer copies the self-contained app to `%LOCALAPPDATA%\Dictophone.CrossP
 
 Open **Settings → Gemini API key**, paste your key and click **Save key**. It applies immediately and is kept separately from settings in `gemini-key.bin`. Windows encrypts it with DPAPI for the current user; Linux and macOS restrict the file to the current user. **Delete key** removes this saved copy. You can also use `GEMINI_API_KEY` in the environment or `%LOCALAPPDATA%\Dictophone.CrossPlatform\.env`; the key saved in Settings takes precedence, followed by the environment variable and then `.env`. Use `.env.example` as a reference; never commit your actual key.
 
-By default, hold **F8** to record, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. Wait for the green indicator before speaking. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
+By default, hold **Ctrl+Space** to record, release it to transcribe, and press **Ctrl+Alt+J** to open history. **Esc** cancels recording or processing. Wait for the green indicator before speaking. Set your own shortcuts in Settings; they save automatically after you release the keys. Existing installations keep their shortcuts and other settings.
 
 Closing the window hides it in the tray. Click the tray icon to reopen it, or choose History / Settings from its menu. Choose Exit to quit. Start at login can also be enabled or disabled in Settings. `start.ps1` / `start.cmd` opens the installed app, or builds and opens a portable copy if needed.
 
