@@ -15,7 +15,7 @@ try {
 
     # Only application assets are allowed as binary files. Scan them for tokens too.
     $binaryAssets = @('src/Govori.Desktop/Assets/govori.png', 'src/Govori.Desktop/Assets/govori.ico')
-    $publicHosts = @('generativelanguage.googleapis.com', 'github.com', 'schemas.microsoft.com', 'www.apple.com')
+    $publicHosts = @('generativelanguage.googleapis.com', 'ai.google.dev', 'github.com', 'schemas.microsoft.com', 'www.apple.com')
     $secretPatterns = @(
         '\bAIza[0-9A-Za-z_-]{35}\b',
         '\b(?:sk-(?:proj-|svcacct-)?|gh[pousr]_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]{20,}\b',
@@ -27,7 +27,7 @@ try {
     $quotedCredential = '(?im)(?<![\w])(?<name>' + $credentialName + ')[ \t]*["'']?[ \t]*[:=][ \t]*["''](?<value>[^"''\r\n]+)["'']'
     $envCredential = '(?im)^[ \t]*(?:export[ \t]+)?' + $credentialName + '[ \t]*=[ \t]*([^\r\n]+)'
     $absolutePath = '(?i)(?<![A-Za-z0-9])(?:[A-Z]:[\\/]+|\\\\[A-Za-z0-9][A-Za-z0-9._-]*[\\/]+|/(?:Users|home)/[^/\s"''<>]+/|file:/{2})'
-    $localFile = '(?i)(?:^|/)(?:history|settings|credentials|service-account[^/]*)\.json(?:\..*)?$|(?:^|/)gemini-key\.bin(?:\..*)?$|(?:^|/)\.env(?:$|\.)|(?:^|/)id_(?:rsa|dsa|ecdsa|ed25519)(?:$|\.)|\.(?:exe|dll|pdb|wav|mp3|m4a|ogg|flac|aac|pem|key|p12|pfx|jks|keystore|log|tmp|damaged|zip|7z|tar|gz)$'
+    $localFile = '(?i)(?:^|/)(?:history|usage|settings|credentials|service-account[^/]*)\.json(?:\..*)?$|(?:^|/)(?:gemini|litellm)-key\.bin(?:\..*)?$|(?:^|/)\.env(?:$|\.)|(?:^|/)id_(?:rsa|dsa|ecdsa|ed25519)(?:$|\.)|\.(?:exe|dll|pdb|wav|mp3|m4a|ogg|flac|aac|pem|key|p12|pfx|jks|keystore|log|tmp|damaged|zip|7z|tar|gz)$'
     $localDirectory = '(?i)(?:^|/)(?:bin|obj|artifacts|app|vendor|output|test-results|recordings|backups|\.vs|\.idea|\.avalonia-build-tasks)(?:/|$)'
 
     function Test-PublicContent([string]$Content, [string]$Label, [bool]$Binary = $false) {
@@ -37,7 +37,7 @@ try {
         if ($Binary) { return }
         foreach ($match in [regex]::Matches($Content, $quotedCredential)) {
             # The two reviewed API-key field captions are UI text, not credentials.
-            if ($Label -match 'src/Govori.Desktop/Localization/(?:en|ru)\.json$' -and $match.Groups['name'].Value -ceq 'ApiKey' -and $match.Groups['value'].Value -cin @('Gemini API key', 'Ключ Gemini API')) { continue }
+            if ($Label -match 'src/Govori.Desktop/Localization/(?:en|ru)\.json$' -and $match.Groups['name'].Value -cin @('ApiKey', 'LiteLlmApiKey') -and $match.Groups['value'].Value -cin @('Gemini API key', 'Ключ Gemini API', 'LiteLLM API key', 'Ключ LiteLLM API', 'Gemini key', 'Ключ Gemini', 'LiteLLM key', 'Ключ LiteLLM')) { continue }
             $failures.Add("Non-empty credential literal: $Label"); break
         }
         foreach ($match in [regex]::Matches($Content, $envCredential)) {

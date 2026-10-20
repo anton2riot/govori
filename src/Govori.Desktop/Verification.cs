@@ -1,4 +1,5 @@
 using Avalonia;
+using Avalonia.Automation;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
@@ -14,7 +15,7 @@ using System.Globalization;
 
 namespace Govori;
 
-internal static class Verification
+internal static partial class Verification
 {
     private static readonly List<string> checks = [];
     private static readonly List<object> audioTimings = [];
@@ -39,7 +40,29 @@ internal static class Verification
     }
     public static async Task RunAsync(MainWindow window, DictationController controller, string[] args)
     {
-        checks.Clear(); audioTimings.Clear(); await Task.Delay(300);
+        checks.Clear(); audioTimings.Clear();
+        if (args.Contains("--ui-costs-only"))
+        {
+            controller.Hotkeys.Enabled = false;
+            await CostAndLayoutChecks(window, controller);
+            checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
+            return;
+        }
+        if (args.Contains("--providers-only")) controller.Hotkeys.Enabled = false;
+        await Task.Delay(300);
+        if (args.Contains("--providers-only"))
+        {
+            controller.Hotkeys.Enabled = false;
+            await ProviderChecks(window, controller, args);
+            checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
+            return;
+        }
+        if (args.Contains("--launch-only"))
+        {
+            await LaunchChecks(window, controller);
+            checks.Add($"Completed: {checks.Count} checks"); File.WriteAllLines(Report, checks);
+            return;
+        }
         if (args.Contains("--microphone-errors"))
         {
             controller.Hotkeys.Enabled = false;
@@ -68,6 +91,7 @@ internal static class Verification
             app.OpenFromTray(); await Task.Delay(100);
         }
         if (OperatingSystem.IsWindows()) await StartupChecks(window, controller);
+        await LaunchChecks(window, controller);
         await ApiKeyChecks(window);
         await LanguageChecks(window, controller);
         await HotkeySettingsChecks(window, controller);
@@ -266,6 +290,57 @@ internal static class Verification
         public Task<Recording?> StopAsync() { IsRecording = false; return Task.FromResult<Recording?>(new(Path, Duration, CurrentLevel)); }
         public void Dispose() { if (File.Exists(Path)) File.Delete(Path); }
     }
+    private static async Task LaunchChecks(MainWindow window, DictationController controller)
+    {
+        Check(Configuration.DataDirectory != Configuration.DefaultDataDirectory, "launch checks use an isolated data directory");
+        using (var duplicate = SingleInstance.TryAcquire(Configuration.DataDirectory, () => { }))
+            Check(duplicate == null, "the data directory is locked against a second application instance");
+
+        string executable = Environment.ProcessPath!;
+        async Task Launch(string path, bool tray)
+        {
+            var start = new ProcessStartInfo(path) { UseShellExecute = false, CreateNoWindow = true };
+            start.ArgumentList.Add("--data-dir"); start.ArgumentList.Add(Configuration.DataDirectory);
+            if (tray) start.ArgumentList.Add("--tray");
+            using var child = Process.Start(start)!;
+            try
+            {
+                await child.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(12));
+                Check(child.ExitCode == 0, "a second launch hands off to the running app and exits successfully");
+            }
+            finally { if (!child.HasExited) { child.Kill(); await child.WaitForExitAsync(); } }
+            await Task.Delay(150);
+        }
+        for (int cycle = 0; cycle < 2; cycle++)
+        {
+            window.Hide(); await Launch(executable, false);
+            Check(window.IsVisible && window.WindowState == WindowState.Normal, $"launching again reopens the existing tray window, cycle {cycle + 1}");
+        }
+        window.Hide(); await Launch(executable, true);
+        Check(!window.IsVisible, "a duplicate startup launch keeps the existing window hidden");
+        if (OperatingSystem.IsWindows())
+        {
+            string copyDirectory = Path.Combine(Configuration.DataDirectory, "second-copy"); Directory.CreateDirectory(copyDirectory);
+            string copy = Path.Combine(copyDirectory, Path.GetFileName(executable)); File.Copy(executable, copy, true);
+            await Launch(copy, false);
+            Check(window.IsVisible, "an executable from another folder opens the same running application");
+            Check(Program.RedirectTarget(copy, executable, []) == executable, "normal launches from another folder use the installed executable");
+            Check(Program.RedirectTarget(executable, executable, []) == null, "the installed executable does not redirect to itself");
+            Check(Program.RedirectTarget(copy, executable, ["--verify"]) == null
+                && Program.RedirectTarget(copy, executable, ["--data-dir", Configuration.DataDirectory]) == null,
+                "verification and explicit data directories never redirect to the user installation");
+            if (controller.Hotkeys is WindowsHotkeys hook)
+            {
+                var probe = hook.ProbeAsync();
+                Thread.Sleep(1500);
+                Check(probe.IsCompletedSuccessfully, "the native keyboard message loop stays responsive while the UI thread is blocked beyond the hook timeout");
+                await hook.ProbeAsync().WaitAsync(TimeSpan.FromSeconds(2));
+                Check(true, "the keyboard message loop continues working after the UI stall");
+            }
+        }
+        window.OpenHistory();
+    }
+
     [SupportedOSPlatform("windows")]
     private static async Task StartupChecks(MainWindow window, DictationController controller)
     {
@@ -298,25 +373,24 @@ internal static class Verification
         byte[]? previousSaved = File.Exists(ApiKeyStore.FilePath) ? File.ReadAllBytes(ApiKeyStore.FilePath) : null;
         window.OpenSettings(); await Task.Delay(100);
         var field = window.GetVisualDescendants().OfType<TextBox>().Single(x => x.Name == "ApiKey");
-        var save = window.GetVisualDescendants().OfType<Button>().Single(x => x.Name == "SaveApiKey");
         var delete = window.GetVisualDescendants().OfType<Button>().Single(x => x.Name == "DeleteApiKey");
         try
         {
             ApiKeyStore.Delete();
             Environment.SetEnvironmentVariable("GEMINI_API_KEY", "verification-environment-key");
-            Check(field.PasswordChar != default && !save.IsEnabled, "API key input is masked and empty keys cannot be saved");
-            field.Text = "verification-saved-key"; save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(field.PasswordChar != default && !window.GetVisualDescendants().OfType<Button>().Any(x => x.Name == "SaveApiKey"), "API key input is masked and has no manual save button");
+            field.Text = "verification-saved-key"; await Task.Delay(650);
             Configuration.LoadEnvironment();
             Check(ApiKeyStore.Read() == "verification-saved-key" && Configuration.ApiKey == "verification-saved-key", "key saved through the interface persists and overrides the environment immediately");
             Check(string.IsNullOrEmpty(field.Text) && delete.IsEnabled, "saving clears the key input and enables deletion");
             Check(!File.ReadAllText(Configuration.SettingsPath).Contains("verification-saved-key"), "API key is kept out of settings JSON");
             if (OperatingSystem.IsWindows())
                 Check(!System.Text.Encoding.UTF8.GetString(File.ReadAllBytes(ApiKeyStore.FilePath)).Contains("verification-saved-key"), "Windows stores the API key encrypted");
-            field.Text = "invalid key"; save.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            field.Text = "invalid key"; await Task.Delay(650);
             Check(ApiKeyStore.Read() == "verification-saved-key", "invalid key input preserves the saved key");
             delete.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Check(!File.Exists(ApiKeyStore.FilePath) && Configuration.ApiKey == "verification-environment-key" && !delete.IsEnabled, "deleting the saved key restores the environment fallback");
-            save.BringIntoView(); await Task.Delay(100);
+            field.Text = ""; field.BringIntoView(); await Task.Delay(100);
             Render(window, Path.Combine(Configuration.DataDirectory, "settings-api-key.png"));
             if (OperatingSystem.IsWindows())
             {
@@ -354,7 +428,7 @@ internal static class Verification
                 selector.SelectedItem = ((IEnumerable<MainWindow.LanguageOption>)selector.ItemsSource!).Single(x => x.Code == code);
                 await Task.Delay(50);
                 Check(controller.Settings.Language == code && Configuration.LoadSettings().Language == code, "language selector applies and persists " + code);
-                Check(window.GetVisualDescendants().OfType<Button>().Any(x => Equals(x.Content, Localization.T("Settings"))), "navigation updates without restart: " + code);
+                Check(window.GetVisualDescendants().OfType<TabItem>().Any(x => x.Name == "SettingsNavigation" && Equals(x.Header, Localization.T("Settings"))), "tab labels update without restart: " + code);
                 Render(window, Path.Combine(Configuration.DataDirectory, "settings-" + code + ".png"));
             }
             var invalid = controller.Settings.Clone(); invalid.Language = "invalid";

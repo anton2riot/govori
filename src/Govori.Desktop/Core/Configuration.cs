@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using System.Security.Cryptography;
+using System.Text.Json.Serialization;
 
 namespace Govori;
 
@@ -9,6 +10,10 @@ public sealed class Settings
     public string Hotkey { get; set; } = "Ctrl+Space";
     public string HistoryHotkey { get; set; } = "Ctrl+Alt+J";
     public string Model { get; set; } = "gemini-2.5-flash";
+    public string Provider { get; set; } = Providers.Gemini;
+    public string LiteLlmBaseUrl { get; set; } = "";
+    public string LiteLlmModel { get; set; } = "";
+    [JsonIgnore] public string ActiveModel => Provider == Providers.LiteLlm ? LiteLlmModel : Model;
     public string Vocabulary { get; set; } = "";
     public string Language { get; set; } = "system";
     public bool RestoreClipboard { get; set; } = true;
@@ -62,24 +67,30 @@ public static class Configuration
     }
 
     public static string? ApiKeyStorageError { get; private set; }
-    internal static bool HasSavedApiKey => File.Exists(ApiKeyStore.FilePath);
-    public static string ApiKey
+    internal static bool HasSavedApiKey => HasSavedKey(Providers.Gemini);
+    internal static bool HasSavedKey(string provider) => File.Exists(ApiKeyStore.PathFor(provider));
+    public static string ApiKey => GetApiKey(Providers.Gemini);
+    public static string GetApiKey(string provider)
     {
-        get
+        ApiKeyStorageError = null;
+        try
         {
-            ApiKeyStorageError = null;
-            try
-            {
-                string saved = ApiKeyStore.Read();
-                if (!string.IsNullOrWhiteSpace(saved)) return saved;
-            }
-            catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException)
-            {
-                ApiKeyStorageError = Localization.T("ApiKeyReadError");
-            }
-            string? environment = Environment.GetEnvironmentVariable("GEMINI_API_KEY");
-            return !string.IsNullOrWhiteSpace(environment) ? environment : env.GetValueOrDefault("GEMINI_API_KEY", "");
+            string saved = ApiKeyStore.Read(provider);
+            if (!string.IsNullOrWhiteSpace(saved)) return saved;
         }
+        catch (Exception ex) when (ex is CryptographicException or IOException or UnauthorizedAccessException)
+        {
+            ApiKeyStorageError = Localization.T("ApiKeyReadError");
+        }
+        if (provider == Providers.LiteLlm) return EnvironmentValue("LITELLM_API_KEY");
+        return EnvironmentValue("GEMINI_API_KEY");
+    }
+    internal static string EnvironmentValue(string name)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrWhiteSpace(value) && OperatingSystem.IsWindows()) value = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.User);
+        if (string.IsNullOrWhiteSpace(value) && OperatingSystem.IsWindows()) value = Environment.GetEnvironmentVariable(name, EnvironmentVariableTarget.Machine);
+        return !string.IsNullOrWhiteSpace(value) ? value.Trim() : env.GetValueOrDefault(name, "");
     }
     public static Settings LoadSettings()
     {
@@ -89,11 +100,13 @@ public static class Configuration
             {
                 var settings = JsonSerializer.Deserialize<Settings>(File.ReadAllText(SettingsPath)) ?? new();
                 if (!Localization.IsSupported(settings.Language)) settings.Language = "system";
+                if (!Providers.IsSupported(settings.Provider)) settings.Provider = Providers.Gemini;
+                if (string.IsNullOrWhiteSpace(settings.LiteLlmBaseUrl)) settings.LiteLlmBaseUrl = EnvironmentValue("LITELLM_BASE_URL");
                 return settings;
             }
             catch (JsonException) { File.Copy(SettingsPath, SettingsPath + ".damaged", true); }
         }
-        return new Settings { Model = env.GetValueOrDefault("GEMINI_MODEL", "gemini-2.5-flash"), Vocabulary = env.GetValueOrDefault("DICTATION_CONTEXT", "") };
+        return new Settings { Model = env.GetValueOrDefault("GEMINI_MODEL", "gemini-2.5-flash"), LiteLlmBaseUrl = EnvironmentValue("LITELLM_BASE_URL"), Vocabulary = env.GetValueOrDefault("DICTATION_CONTEXT", "") };
     }
     public static void SaveSettings(Settings settings) => AtomicWrite(SettingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
     public static void AtomicWrite(string path, string text)

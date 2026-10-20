@@ -16,6 +16,7 @@
     <PackageReference Include="System.Security.Cryptography.ProtectedData" Version="9.0.0" />
     <AvaloniaResource Include="Assets/**" />
     <EmbeddedResource Include="Localization/*.json" LogicalName="Govori.Localization.%(Filename)%(Extension)" />
+    <Content Include="ThirdPartyNotices/**" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" ExcludeFromSingleFile="true" />
     <InternalsVisibleTo Include="Govori.Tests" />
   </ItemGroup>
 </Project>

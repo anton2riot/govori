@@ -42,25 +42,28 @@ $temporarySettings = $settingsPath + '.tmp'
 Move-Item -LiteralPath $temporarySettings -Destination $settingsPath -Force
 $startupDirectory = [Environment]::GetFolderPath('Startup')
 $startupShortcut = Join-Path $startupDirectory 'Govori.lnk'
-if ($settings.StartWithSystem) {
-    New-Item -ItemType Directory -Path $startupDirectory -Force | Out-Null
-    $shell = New-Object -ComObject WScript.Shell
+$shell = New-Object -ComObject WScript.Shell
+function Save-GovoriShortcut([string]$Path, [string]$Arguments = '') {
+    New-Item -ItemType Directory -Path (Split-Path $Path) -Force | Out-Null
     $shortcut = $null
     try {
-        $shortcut = $shell.CreateShortcut($startupShortcut)
+        $shortcut = $shell.CreateShortcut($Path)
         $shortcut.TargetPath = $executable
-        $shortcut.Arguments = '--tray'
+        $shortcut.Arguments = $Arguments
         $shortcut.WorkingDirectory = $installationDirectory
         $shortcut.Description = 'Govori'
         $shortcut.IconLocation = $executable + ',0'
         $shortcut.Save()
     } finally {
         if ($null -ne $shortcut) { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shortcut) | Out-Null }
-        [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null
     }
-} elseif (Test-Path -LiteralPath $startupShortcut) {
-    Remove-Item -LiteralPath $startupShortcut
 }
+try {
+    Save-GovoriShortcut (Join-Path ([Environment]::GetFolderPath('Desktop')) 'Govori.lnk')
+    Save-GovoriShortcut (Join-Path ([Environment]::GetFolderPath('Programs')) 'Govori.lnk')
+    if ($settings.StartWithSystem) { Save-GovoriShortcut $startupShortcut '--tray' }
+    elseif (Test-Path -LiteralPath $startupShortcut) { Remove-Item -LiteralPath $startupShortcut }
+} finally { [Runtime.InteropServices.Marshal]::FinalReleaseComObject($shell) | Out-Null }
 $startupKey = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
 try {
     # Migrate the old Run entry after saving the startup shortcut.

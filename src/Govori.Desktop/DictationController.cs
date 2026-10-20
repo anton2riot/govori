@@ -1,7 +1,6 @@
 using Avalonia.Threading;
 using System.Diagnostics;
 using System.Net.Http;
-using System.Text.RegularExpressions;
 
 namespace Govori;
 
@@ -13,7 +12,8 @@ internal sealed class DictationController : IDisposable
     internal TextInserter Inserter { get; private set; } = null!;
     public Settings Settings { get; private set; }
     public HistoryStore History { get; }
-    private readonly GeminiClient gemini = new();
+    public UsageStore Usage { get; }
+    internal TranscriptionClient Transcriber { get; } = new();
     private readonly SemaphoreSlim networkGate = new(1);
     private readonly Dictionary<string, CancellationTokenSource> processing = [];
     private readonly DispatcherTimer timer = new() { Interval = TimeSpan.FromMilliseconds(40) };
@@ -33,7 +33,7 @@ internal sealed class DictationController : IDisposable
 
     public DictationController(IAudioRecorder? recorder = null)
     {
-        Settings = Configuration.LoadSettings(); Localization.Apply(Settings.Language); History = new();
+        Settings = Configuration.LoadSettings(); Localization.Apply(Settings.Language); History = new(); Usage = new();
         Platform = DesktopPlatform.Create(); Recorder = recorder ?? new AudioRecorder();
         Recorder.BecameReady += () => Dispatcher.UIThread.Post(UpdateRecordingReady);
         Hotkeys = Platform.CreateHotkeys(Hotkey.Parse(Settings.Hotkey), Hotkey.Parse(Settings.HistoryHotkey));
@@ -79,7 +79,8 @@ internal sealed class DictationController : IDisposable
     {
         if (Recording || stopping || IsExiting) return;
         Configuration.LoadEnvironment();
-        if (string.IsNullOrWhiteSpace(Configuration.ApiKey)) { SetStatus(Localization.T("ApiKeyNotFound")); return; }
+        if (string.IsNullOrWhiteSpace(Configuration.GetApiKey(Settings.Provider))) { SetStatus(Localization.T("ApiKeyNotFound")); return; }
+        if (string.IsNullOrWhiteSpace(Settings.ActiveModel)) { SetStatus(Localization.T("InvalidModel")); window?.OpenSettings(); return; }
         try
         {
             cancelled = false; ready = false; ReadySoundPlayback = null; target = Platform.ForegroundWindow();
@@ -138,7 +139,8 @@ internal sealed class DictationController : IDisposable
             await networkGate.WaitAsync(cancellation.Token); acquired = true;
             entry.Status = "transcribing"; entry.Error = ""; History.Save();
             var elapsed = Stopwatch.StartNew();
-            var text = await gemini.TranscribeAsync(entry.AudioPath, settings, Configuration.ApiKey, cancellation.Token);
+            var text = await Transcriber.TranscribeAsync(entry.AudioPath, settings, Configuration.GetApiKey(settings.Provider), cancellation.Token,
+                charge => { charge.HistoryId = entry.Id; Usage.Save(charge); }, entry.Duration);
             entry.Latency = elapsed.Elapsed.TotalSeconds; entry.Text = text;
             entry.Status = string.IsNullOrWhiteSpace(text) ? "empty" : "saved"; History.Save();
             if (!Recording && processing.Count == 1) HideIndicator();
@@ -179,7 +181,9 @@ internal sealed class DictationController : IDisposable
         if (Recording) throw new InvalidOperationException(Localization.T("FinishRecording"));
         var hotkey = Hotkey.Parse(settings.Hotkey); var history = Hotkey.Parse(settings.HistoryHotkey);
         if (hotkey == history) throw new FormatException(Localization.T("DifferentShortcuts"));
-        if (!Regex.IsMatch(settings.Model, "^gemini-[A-Za-z0-9._-]+$")) throw new FormatException(Localization.T("InvalidModel"));
+        if (!Providers.IsSupported(settings.Provider)) throw new FormatException(Localization.T("InvalidProvider"));
+        if (settings.Provider == Providers.Gemini && !TranscriptionClient.IsGeminiAudioModel(settings.Model)) throw new FormatException(Localization.T("InvalidModel"));
+        if (settings.Provider == Providers.LiteLlm && !string.IsNullOrWhiteSpace(settings.LiteLlmBaseUrl)) TranscriptionClient.BaseUri(settings.LiteLlmBaseUrl);
         if (!Localization.IsSupported(settings.Language)) throw new FormatException(Localization.T("InvalidLanguage"));
         settings.Hotkey = hotkey.Label; settings.HistoryHotkey = history.Label;
         var old = Settings; bool startupChanged = settings.StartWithSystem != old.StartWithSystem;
@@ -198,7 +202,7 @@ internal sealed class DictationController : IDisposable
         Settings = settings;
         if (settings.Language != old.Language) Localization.Apply(settings.Language);
         SettingsChanged?.Invoke();
-        if (!Busy && settings.Language != old.Language) SetIdleStatus();
+        if (!Busy) SetIdleStatus();
     }
     public async Task SetHotkeyCapture(bool capture)
     {
@@ -221,17 +225,17 @@ internal sealed class DictationController : IDisposable
     private void HideIndicator() { if (overlay?.State != "error") overlay?.Hide(); }
     internal void SaveApiKey(string key)
     {
-        ApiKeyStore.Save(key);
+        ApiKeyStore.Save(key, Settings.Provider);
         if (!Busy) SetIdleStatus();
     }
     internal void DeleteApiKey()
     {
-        ApiKeyStore.Delete();
+        ApiKeyStore.Delete(Settings.Provider);
         if (!Busy) SetIdleStatus();
     }
-    private void SetIdleStatus() => SetStatus(string.IsNullOrWhiteSpace(Configuration.ApiKey)
+    private void SetIdleStatus() => SetStatus(string.IsNullOrWhiteSpace(Configuration.GetApiKey(Settings.Provider))
         ? Localization.T("ApiKeyNotFound")
-        : Platform.Limitation ?? Localization.T("Ready", Settings.Hotkey));
+        : Localization.T("Ready"));
     public async Task ExitAsync()
     {
         if (IsExiting) return;
@@ -242,6 +246,6 @@ internal sealed class DictationController : IDisposable
     }
     public void Dispose()
     {
-        IsExiting = true; timer.Stop(); Hotkeys.Dispose(); Recorder.Dispose(); Platform.Dispose(); gemini.Dispose(); overlay?.Close();
+        IsExiting = true; timer.Stop(); Hotkeys.Dispose(); Recorder.Dispose(); Platform.Dispose(); Transcriber.Dispose(); overlay?.Close();
     }
 }

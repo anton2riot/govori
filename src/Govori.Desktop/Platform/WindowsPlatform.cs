@@ -49,12 +49,49 @@ internal sealed class WindowsPlatform : IDesktopPlatform
 internal sealed class WindowsHotkeys : HotkeyState
 {
     private readonly WindowsNative.HookProc callback;
+    private readonly Thread thread;
+    private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly System.Collections.Concurrent.ConcurrentQueue<TaskCompletionSource> probes = new();
+    private uint threadId;
+    private int disposed;
     private nint hook;
     public WindowsHotkeys(IDesktopPlatform platform, Hotkey dictation, Hotkey history) : base(platform, dictation, history)
     {
         callback = OnKey;
-        hook = WindowsNative.SetWindowsHookEx(13, callback, WindowsNative.GetModuleHandle(null), 0);
-        if (hook == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), Localization.T("HotkeyRegistrationFailed"));
+        // A low-level hook must keep pumping even while Avalonia opens devices,
+        // loads history or handles a slow UI operation. Windows removes timed-out hooks.
+        thread = new Thread(Run) { IsBackground = true, Name = "Govori keyboard" };
+        thread.Start();
+        ready.Task.GetAwaiter().GetResult();
+    }
+    private void Run()
+    {
+        try
+        {
+            threadId = WindowsNative.GetCurrentThreadId();
+            WindowsNative.PeekMessage(out _, 0, 0, 0, 0);
+            hook = WindowsNative.SetWindowsHookEx(13, callback, WindowsNative.GetModuleHandle(null), 0);
+            if (hook == 0) throw new Win32Exception(Marshal.GetLastWin32Error(), Localization.T("HotkeyRegistrationFailed"));
+            ready.SetResult();
+            while (WindowsNative.GetMessage(out var message, 0, 0, 0) > 0)
+            {
+                if (message.Id == 0x8001) { while (probes.TryDequeue(out var probe)) probe.TrySetResult(); }
+                else { WindowsNative.TranslateMessage(message); WindowsNative.DispatchMessage(message); }
+            }
+        }
+        catch (Exception ex) { ready.TrySetException(ex); }
+        finally
+        {
+            if (hook != 0) { WindowsNative.UnhookWindowsHookEx(hook); hook = 0; }
+            while (probes.TryDequeue(out var probe)) probe.TrySetCanceled();
+        }
+    }
+    internal Task ProbeAsync()
+    {
+        var probe = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        probes.Enqueue(probe);
+        if (!WindowsNative.PostThreadMessage(threadId, 0x8001, 0, 0)) probe.TrySetException(new Win32Exception(Marshal.GetLastWin32Error()));
+        return probe.Task;
     }
     private nint OnKey(int code, nint message, nint pointer)
     {
@@ -63,5 +100,10 @@ internal sealed class WindowsHotkeys : HotkeyState
         bool handled = HandleKey((int)e.Key, message is 0x100 or 0x104, message is 0x101 or 0x105, (e.Flags & 0x10) != 0);
         return handled ? 1 : WindowsNative.CallNextHookEx(hook, code, message, pointer);
     }
-    public override void Dispose() { if (hook != 0) { WindowsNative.UnhookWindowsHookEx(hook); hook = 0; } }
+    public override void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        WindowsNative.PostThreadMessage(threadId, 0x0012, 0, 0);
+        thread.Join();
+    }
 }

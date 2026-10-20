@@ -9,7 +9,6 @@ namespace Govori;
 
 public sealed class App : Application
 {
-    private FileStream? singleton;
     private TrayIcon? tray;
     internal DictationController? Controller { get; private set; }
     public override void Initialize() => AvaloniaXamlLoader.Load(this);
@@ -18,17 +17,12 @@ public sealed class App : Application
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
             var args = desktop.Args ?? [];
-            int dataIndex = Array.IndexOf(args, "--data-dir");
-            if (dataIndex >= 0 && dataIndex + 1 < args.Length) Configuration.UseDataDirectory(args[dataIndex + 1]);
-            Configuration.LoadEnvironment();
             if (args.Contains("--paste-target"))
             {
                 int index = Array.IndexOf(args, "--paste-target");
                 desktop.MainWindow = Verification.CreatePasteTarget(args[index + 1], args[index + 2]);
                 base.OnFrameworkInitializationCompleted(); return;
             }
-            try { singleton = new FileStream(Path.Combine(Configuration.DataDirectory, "instance.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
-            catch (IOException) { desktop.Shutdown(); base.OnFrameworkInitializationCompleted(); return; }
             Controller = new DictationController();
             var window = new MainWindow(Controller); desktop.MainWindow = window;
             Controller.Attach(window);
@@ -39,7 +33,7 @@ public sealed class App : Application
             }
             desktop.ShutdownMode = ShutdownMode.OnExplicitShutdown;
             CreateTray(window, desktop);
-            desktop.Exit += (_, _) => { tray?.Dispose(); Controller.Dispose(); singleton?.Dispose(); };
+            desktop.Exit += (_, _) => { tray?.Dispose(); Controller.Dispose(); };
             window.Closing += (_, e) => { if (!Controller.IsExiting && !args.Contains("--verify") && !args.Contains("--preview")) { e.Cancel = true; window.Hide(); } };
             if (args.Contains("--tray"))
             {
@@ -47,7 +41,7 @@ public sealed class App : Application
                 hideOnStartup = (_, _) =>
                 {
                     window.Opened -= hideOnStartup;
-                    Dispatcher.UIThread.Post(window.Hide);
+                    Dispatcher.UIThread.Post(() => { if (!Program.ActivationRequested) window.Hide(); });
                 };
                 window.Opened += hideOnStartup;
             }

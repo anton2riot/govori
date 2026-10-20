@@ -4,7 +4,9 @@
 !.env.example
 **/settings.json
 **/gemini-key.bin
+**/litellm-key.bin
 **/history.json
+**/usage.json
 **/credentials.json
 **/service-account*.json
 **/recordings/

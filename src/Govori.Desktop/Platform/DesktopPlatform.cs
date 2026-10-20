@@ -60,11 +60,13 @@ internal abstract class HotkeyState : IGlobalHotkeys
 {
     private readonly HashSet<int> swallowed = [];
     private bool holding;
+    private volatile bool enabled = true, recording;
+    private volatile Hotkey dictation = null!, history = null!;
     protected readonly IDesktopPlatform Platform;
-    public virtual Hotkey Dictation { get; set; }
-    public virtual Hotkey History { get; set; }
-    public bool Enabled { get; set; } = true;
-    public bool Recording { get; set; }
+    public virtual Hotkey Dictation { get => dictation; set => dictation = value; }
+    public virtual Hotkey History { get => history; set => history = value; }
+    public bool Enabled { get => enabled; set => enabled = value; }
+    public bool Recording { get => recording; set => recording = value; }
     public event Action? Pressed, Released, Cancelled, HistoryRequested;
     protected HotkeyState(IDesktopPlatform platform, Hotkey dictation, Hotkey history) { Platform = platform; Dictation = dictation; History = history; }
     internal bool HandleKey(int key, bool down, bool up, bool injected, bool? match = null)
